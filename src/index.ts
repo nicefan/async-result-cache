@@ -2,10 +2,10 @@
 const store: Obj<CacheResult> = {}
 
 /** 请求并缓存数据 */
-export function getDataCache<T extends Obj = Obj>(type: string, request: Fn<Promise<any>>) {
-  const cache = store[type] as CacheResult<T>
+export function getDataCache<T extends Obj = Obj>(name: string, request: Fn<Promise<any>>, keyField?: string) {
+  const cache = store[name] as CacheResult<T>
   if (!cache) {
-    return new CacheResult<T>(type, request)
+    return (store[name] = new CacheResult<T>(name, request, keyField))
   } else if (cache.status === 'ready') {
     cache.load(request)
   }
@@ -27,7 +27,6 @@ export class CacheResult<T extends Obj = Obj> {
   promise: Promise<T[]>
 
   constructor(public name: string, request: Fn<Promise<any>>, private _key?: string) {
-    store[name] = this
     this.promise = this.load(request)
   }
   load(request: Fn<Promise<any>>) {
