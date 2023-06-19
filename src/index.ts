@@ -185,7 +185,15 @@ export const buildCache: BuildCache = (
   config: Fn | Record<string, Fn | CacheParam>,
   _store: Obj = {}
 ) => {
-  const _config = formatConfig(config);
+  const _config: Obj<CacheParam> = {};
+  if (typeof config === "function") {
+    _config.default = { request: config };
+  } else {
+    Object.keys(config).forEach((key) => {
+      const value = config[key];
+      _config[key] = typeof value === "function" ? { request: value } : value;
+    });
+  } 
 
   const getData = (name: string) => {
     let cache = Reflect.get(_store, name); //as CacheResult<T>
@@ -205,19 +213,6 @@ export const buildCache: BuildCache = (
     getData,
   };
 };
-
-function formatConfig(config) {
-  const _config: Obj<CacheParam> = {};
-  if (typeof config === "function") {
-    _config.default = { request: config };
-  } else {
-    Object.keys(config).forEach((key) => {
-      const value = config[key];
-      _config[key] = typeof value === "function" ? { request: value } : value;
-    });
-  }
-  return _config;
-}
 
 export function createCacheStore(data: Obj = {}) {
   return {
@@ -242,8 +237,3 @@ export function createCacheStore(data: Obj = {}) {
     },
   };
 }
-const api = () => Promise.resolve([{ value: "", label: "" }]);
-const cs = createCacheStore();
-const ca = cs.registApi(api);
-const re = ca();
-re.map;
