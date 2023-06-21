@@ -1,37 +1,11 @@
-// 用户数据缓存
-const store: Map<string, CacheResult> = new Map();
-
-/** 请求并缓存数据 */
-export function getDataCache<T extends Obj = Obj>(
-  name: string,
-  request: (name: string) => Promise<T[]>,
-  keyField?: string
-) {
-  let cache = store.get(name) as CacheResult<T>;
-  if (!cache) {
-    cache = new CacheResult<T>({ request, keyField }, name);
-    store.set(name, cache);
-  }
-  return cache;
-}
-
-/** 清理缓存，刷新数据, */
-export function clearDataCache(name: string) {
-  store.delete(name);
-}
-
-export function clearAllCache() {
-  store.clear();
-}
-
 type DataType = "dict" | "record" | void;
 function checkType(item?: Obj, key?: string, labelField?: string): DataType {
   if (typeof item === "object") {
     return (key && labelField) || ("value" in item && "label" in item)
       ? "dict"
       : key && key in item
-      ? "record"
-      : undefined;
+        ? "record"
+        : undefined;
   }
 }
 
@@ -71,7 +45,6 @@ type DictMap<T> = T extends any[]
   : T;
 export class CacheResult<T extends Obj | Obj[] = Obj> {
   private _map?: DictMap<T>;
-  // private _promise!: Promise<SyncData<T>>;
   private _result?: T;
   load: () => Promise<SyncData<T>>;
   constructor(request: Fn<Promise<any>>, param?: any);
@@ -80,8 +53,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     let status: SyncData<T>["status"] = "ready";
     let delay = false;
     let _promise: Promise<SyncData<T>>;
-    const _config: CacheParam =
-      typeof config === "function" ? { request: config } : config;
+    const _config: CacheParam = typeof config === "function" ? { request: config } : config;
     const { request, keyField, labelField } = _config;
     const reload = () => {
       status = "ready";
@@ -107,10 +79,10 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
           status = "error";
           return { status, reload };
         })).finally(() => {
-        setTimeout(() => {
-          delay = false;
-        }, 1000);
-      });
+          setTimeout(() => {
+            delay = false;
+          }, 1000);
+        });
     };
     this.load();
   }
@@ -130,10 +102,18 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
   getResult() {
     return this.load()
       .then((result) => (result.status === "error" ? this.reload() : result))
-      .then(({ res }) => {
+      .then(({ res, keyField = "value", labelField }) => {
         // 取值时进行赋值，被vue代理时this对象为代理对象，可监测数据变化，在构造时this为原始对象，赋值不会响应。
-        this._result = res;
-        return res ;
+        if (labelField) {
+          this._result = res?.map((item) => ({
+            id: item.id,
+            value: item[keyField] ?? item.id,
+            label: [],
+          }));
+        } else {
+          this._result = res;
+        }
+        return res;
       });
   }
 
@@ -151,89 +131,113 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     });
   }
 
-  get map()  {
+  get map() {
     this.getMap();
-    return this._map || {} as DictMap<T>;
+    return this._map || ({} as DictMap<T>);
   }
 }
 
-type RequestReturn<T extends Fn | CacheParam> = ReturnType<
-  T extends { request: infer P } ? P : T
-> extends Promise<infer R>
-  ? R extends Obj[]
-    ? R[0]
-    : never
+type GetRequest<T extends Fn | CacheParam> = T extends { request: infer P } ? P : T;
+type RequestReturn<T extends Fn | CacheParam> = ReturnType<GetRequest<T>> extends Promise<infer R>
+  ? NonNullable<R>
   : never;
+type RequestParam<T extends Fn | CacheParam> = Parameters<GetRequest<T>>;
 
-interface BuildCache {
-  <T extends Obj>(request: (name: string) => Promise<T[]>, store?: Obj): {
-    store: { [key: string]: CacheResult<T> };
-    getData: (name: string) => CacheResult<T>;
-  };
-  <T extends Obj<Fn | CacheParam>>(config: T, store?: Obj): {
-    store: { [K in keyof T]: CacheResult<RequestReturn<T[K]>> };
-    getData: {
-      <K extends keyof Omit<T, "default">>(name: K): CacheResult<
-        RequestReturn<T[K]>
-      >;
-      (name: string): CacheResult<RequestReturn<T["default"]>>;
-    };
-  };
-}
+type CacheConfig<T extends Obj, P extends any[]> = {
+  store?: Obj;
+  transform?: (data: CacheResult<T>) => Obj;
+} & CacheParam<T, P>;
 
-export const buildCache: BuildCache = (
-  config: Fn | Record<string, Fn | CacheParam>,
-  _store: Obj = {}
-) => {
-  const _config: Obj<CacheParam> = {};
-  if (typeof config === "function") {
-    _config.default = { request: config };
-  } else {
-    Object.keys(config).forEach((key) => {
-      const value = config[key];
-      _config[key] = typeof value === "function" ? { request: value } : value;
-    });
-  } 
+export function createCache<T extends Obj, P extends any[]>(
+  api: CacheConfig<T, P> | ((...args: P) => Promise<T>)
+) {
+  const config = typeof api === "function" ? { request: api } : api;
+  const { store = {}, transform, request, keyField, labelField } = config;
 
-  const getData = (name: string) => {
-    let cache = Reflect.get(_store, name); //as CacheResult<T>
+  const getData = (...args: P): CacheResult<T> => {
+    const key = JSON.stringify(args.join() || "default");
+    let cache = Reflect.get(store, key);
     if (!cache) {
-      const item = _config[name] || _config.default;
-      try {
-        cache = new CacheResult(item, name);
-        Reflect.set(_store, name, cache);
-      } catch {
-        Promise.reject(new Error(`无对应数据配置"${name}"`));
-      }
+      const payload = args[0];
+      cache = new CacheResult({ request, keyField, labelField }, payload);
+      if (transform) cache = transform(cache);
+      Reflect.set(store, key, cache);
     }
     return cache;
   };
-  return {
-    store: _store,
-    getData,
-  };
+  return getData;
+}
+
+type CacheStoreConfig = {
+  store?: Obj;
+  transform?: (data: CacheResult) => Obj;
 };
 
-export function createCacheStore(data: Obj = {}) {
-  return {
-    registApi<T extends Obj, P extends any[]>(
-      api: CacheParam<T, P> | ((...arg: P) => Promise<T>)
-    ) {
-      const config = typeof api === "function" ? { request: api } : api;
-      const key = Symbol("default");
-      const store = (data[key as any] = {});
+function registBache<T extends Obj<Fn | CacheParam>>(
+  apis: T,
+  config: CacheStoreConfig = {}
+) {
+  const { store = {}, transform } = config;
 
-      const getData = (...args: P): CacheResult<T> => {
-        const payload = args[0];
-        const key = JSON.stringify(payload || "default");
-        let cache = Reflect.get(store, key);
-        if (!cache) {
-          cache = new CacheResult(config, payload);
-          Reflect.set(store, key, cache);
-        }
-        return cache;
-      };
-      return getData;
+  const methods: {
+    [K in keyof T]: (...args: RequestParam<T[K]>) => CacheResult<RequestReturn<T[K]>>;
+  } = {} as any;
+
+  Object.keys(apis).forEach((key) => {
+    const data = (store[key] = {});
+    const api = apis[key];
+    const config = typeof api === "function" ? { request: api } : api;
+    methods[key as keyof T] = createCache({
+      store: data,
+      transform,
+      ...config,
+    }) as any;
+  });
+  return methods;
+}
+
+export function createCacheStore(config: CacheStoreConfig) {
+  const { store = {}, transform } = config;
+  const apisMap = new Map();
+  return {
+    produceBache: <T extends Obj<Fn | CacheParam>>(apis: T) => registBache(apis, { store, transform }),
+    produce: <T extends Obj, P extends any[]>(api: CacheParam<T, P> | CacheParam<T, P>["request"]) => {
+      const { request, keyField, labelField }: CacheParam = typeof api === "function" ? { request: api } : api;
+      let method: (...args: P) => CacheResult<T>;
+      if (apisMap.has(request)) {
+        method = apisMap.get(request);
+      } else {
+        method = createCache<T, P>({
+          store,
+          transform,
+          request,
+          labelField,
+          keyField,
+        });
+        apisMap.set(request, method);
+      }
+      return method;
     },
+  };
+}
+
+function produce<T extends Obj<Fn | CacheParam>>(config: T) {
+  const caches: {
+    [K in keyof T]: (
+      ...args: RequestParam<T[K]>
+    ) => CacheResult<RequestReturn<T[K]>>;
+  } = {} as any;
+
+  Object.keys(config).forEach((key) => {
+    caches[key as keyof T] = cacheProduce(config[key]);
+  });
+  return caches;
+}
+
+function cacheProduce<T extends Obj, P extends any[]>(api: CacheParam<T, P> | ((...arg: P) => Promise<T>)) {
+  const config = typeof api === "function" ? { request: api } : api;
+  return (...args: P): CacheResult<T> => {
+    const payload = args[0];
+    return new CacheResult(config, payload);
   };
 }
