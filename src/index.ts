@@ -4,8 +4,8 @@ function checkType(item?: Obj, key?: string, labelField?: string): DataType {
     return (key && labelField) || ("value" in item && "label" in item)
       ? "dict"
       : key && key in item
-        ? "record"
-        : undefined;
+      ? "record"
+      : undefined;
   }
 }
 
@@ -27,8 +27,9 @@ function buildMap(list, keyField?: string, labelField?: string) {
   }
 }
 
-type CacheParam<T = any, P extends any[] = any> = {
+export type CacheParam<T = any, P extends any[] = any> = {
   request: (...args: P) => Promise<T>;
+  name?: string;
   keyField?: string;
   labelField?: string;
 };
@@ -79,10 +80,10 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
           status = "error";
           return { status, reload };
         })).finally(() => {
-          setTimeout(() => {
-            delay = false;
-          }, 1000);
-        });
+        setTimeout(() => {
+          delay = false;
+        }, 1000);
+      });
     };
     this.load();
   }
@@ -143,7 +144,7 @@ type RequestReturn<T extends Fn | CacheParam> = ReturnType<GetRequest<T>> extend
   : never;
 type RequestParam<T extends Fn | CacheParam> = Parameters<GetRequest<T>>;
 
-type CacheConfig<T extends Obj, P extends any[]> = {
+export type CacheConfig<T extends Obj, P extends any[]> = {
   store?: Obj;
   transform?: (data: CacheResult<T>) => Obj;
 } & CacheParam<T, P>;
@@ -155,7 +156,7 @@ export function createCache<T extends Obj, P extends any[]>(
   const { store = {}, transform, request, keyField, labelField } = config;
 
   const getData = (...args: P): CacheResult<T> => {
-    const key = JSON.stringify(args.join() || "default");
+    const key = JSON.stringify(args);
     let cache = Reflect.get(store, key);
     if (!cache) {
       const payload = args[0];
@@ -173,14 +174,16 @@ type CacheStoreConfig = {
   transform?: (data: CacheResult) => Obj;
 };
 
-function registBache<T extends Obj<Fn | CacheParam>>(
+export function registBatch<T extends Obj<Fn | CacheParam>>(
   apis: T,
   config: CacheStoreConfig = {}
 ) {
   const { store = {}, transform } = config;
 
   const methods: {
-    [K in keyof T]: (...args: RequestParam<T[K]>) => CacheResult<RequestReturn<T[K]>>;
+    [K in keyof T]: (
+      ...args: RequestParam<T[K]>
+    ) => CacheResult<RequestReturn<T[K]>>;
   } = {} as any;
 
   Object.keys(apis).forEach((key) => {
@@ -200,23 +203,23 @@ export function createCacheStore(config: CacheStoreConfig) {
   const { store = {}, transform } = config;
   const apisMap = new Map();
   return {
-    produceBache: <T extends Obj<Fn | CacheParam>>(apis: T) => registBache(apis, { store, transform }),
-    produce: <T extends Obj, P extends any[]>(api: CacheParam<T, P> | CacheParam<T, P>["request"]) => {
-      const { request, keyField, labelField }: CacheParam = typeof api === "function" ? { request: api } : api;
-      let method: (...args: P) => CacheResult<T>;
-      if (apisMap.has(request)) {
-        method = apisMap.get(request);
-      } else {
-        method = createCache<T, P>({
-          store,
+    produceBatch: <T extends Obj<Fn | CacheParam>>(apis: T) => registBatch(apis, { store, transform }),
+    produce: <T extends Obj, P extends any[]>(
+      api: CacheParam<T, P> | CacheParam<T, P>["request"]
+    ) => {
+      const { request, name, keyField, labelField }: CacheParam = typeof api === "function" ? { request: api } : api;
+      const dataKey = name || request;
+      if (!apisMap.has(dataKey)) {
+        const data = store[Symbol() as any] = {}
+        apisMap.set(dataKey, createCache<T, P>({
+          store: data,
           transform,
           request,
           labelField,
           keyField,
-        });
-        apisMap.set(request, method);
+        }))
       }
-      return method;
+      return apisMap.get(dataKey)
     },
   };
 }
@@ -234,7 +237,9 @@ function produce<T extends Obj<Fn | CacheParam>>(config: T) {
   return caches;
 }
 
-function cacheProduce<T extends Obj, P extends any[]>(api: CacheParam<T, P> | ((...arg: P) => Promise<T>)) {
+function cacheProduce<T extends Obj, P extends any[]>(
+  api: CacheParam<T, P> | ((...arg: P) => Promise<T>)
+) {
   const config = typeof api === "function" ? { request: api } : api;
   return (...args: P): CacheResult<T> => {
     const payload = args[0];
