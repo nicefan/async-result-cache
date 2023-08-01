@@ -41,9 +41,7 @@ interface SyncData<T> {
   keyField?: string
   labelField?: string
 }
-type DictMap<T> = T extends any[]
-  ? Record<string, T[0] extends { value: any; label: string } ? string : T[0]>
-  : T
+type DictMap<T> = T extends any[] ? Record<string, T[0] extends { value: any; label: string } ? string : T[0]> : T
 export class CacheResult<T extends Obj | Obj[] = Obj> {
   private _map?: DictMap<T>
   private _result?: T
@@ -54,8 +52,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     let status: SyncData<T>['status'] = 'ready'
     let delay = false
     let _promise: Promise<SyncData<T>>
-    const _config: CacheParam =
-      typeof config === 'function' ? { request: config } : config
+    const _config: CacheParam = typeof config === 'function' ? { request: config } : config
     const { request, keyField, labelField } = _config
     const reload = () => {
       status = 'ready'
@@ -110,12 +107,12 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
           this._result = res?.map((item) => ({
             id: item.id,
             value: item[keyField] ?? item.id,
-            label: [],
+            label: item[labelField],
           }))
         } else {
           this._result = res
         }
-        return res
+        return this._result as T
       })
   }
 
@@ -144,13 +141,17 @@ type CacheConfig<T extends Obj, P extends any[]> = {
   transform?: (data: CacheResult<T>) => Obj
 } & CacheParam<T, P>
 
-export function createCache<T extends Obj, P extends any[]>(
-  api: CacheConfig<T, P> | ((...args: P) => Promise<T>)
-) {
+export function createCache<P extends any[], R extends Obj<any>[], L extends string>(
+  api: CacheConfig<R, P> & { labelField: L }
+): (...args: P) => CacheResult<Dict<R[0][`${L}`]>[]>
+export function createCache<R extends Obj, P extends any[]>(
+  api: CacheConfig<R, P> | ((...args: P) => Promise<R>)
+): (...args: P) => CacheResult<R>
+export function createCache(api: any) {
   const config = typeof api === 'function' ? { request: api } : api
   const { store = {}, transform, request, keyField, labelField } = config
 
-  const getData = (...args: P): CacheResult<T> => {
+  const getData = (...args) => {
     const key = JSON.stringify(args)
     let cache = Reflect.get(store, key)
     if (!cache) {
@@ -168,25 +169,16 @@ type CacheStoreConfig = {
   store?: Obj
   transform?: (data: CacheResult) => Obj
 }
-type GetRequest<T extends Fn | CacheParam> = T extends { request: infer P }
-  ? P
-  : T
-type RequestReturn<T extends Fn | CacheParam> = ReturnType<
-  GetRequest<T>
-> extends Promise<infer R>
+type GetRequest<T extends Fn | CacheParam> = T extends { request: infer P } ? P : T
+type RequestReturn<T extends Fn | CacheParam> = ReturnType<GetRequest<T>> extends Promise<infer R>
   ? NonNullable<R>
   : never
 
-export function registBatch<T extends Obj<Fn | CacheParam>>(
-  apis: T,
-  config: CacheStoreConfig = {}
-) {
+export function registBatch<T extends Obj<Fn | CacheParam>>(apis: T, config: CacheStoreConfig = {}) {
   const { store = {}, transform } = config
 
   const methods: {
-    [K in keyof T]: (
-      ...args: Parameters<GetRequest<T[K]>>
-    ) => CacheResult<RequestReturn<T[K]>>
+    [K in keyof T]: (...args: Parameters<GetRequest<T[K]>>) => CacheResult<RequestReturn<T[K]>>
   } = {} as any
 
   Object.keys(apis).forEach((key) => {
@@ -201,42 +193,51 @@ export function registBatch<T extends Obj<Fn | CacheParam>>(
   })
   return methods
 }
-
+type Dict<T = any> = {
+  id: T
+  label: string
+  value: T
+}
+type CacheProduce<> = {
+  <P extends any[], R extends Obj<any>[], L extends string>(api: CacheParam<R, P> & { labelField: L }): (
+    ...args: P
+  ) => CacheResult<Dict<R[0][`${L}`]>[]>
+  <P extends any[], R extends Obj<any>>(api: CacheParam<R, P> | ((...args: P) => Promise<R>)): (
+    ...args: P
+  ) => CacheResult<R>
+}
 export function createCacheStore(config: CacheStoreConfig) {
   const { store = {}, transform } = config
   const apisMap = new Map()
+
+  const produce: CacheProduce = (api: any) => {
+    const { request, name, keyField, labelField }: CacheParam = typeof api === 'function' ? { request: api } : api
+    const dataKey = name || request
+    if (!apisMap.has(dataKey)) {
+      const data = (store[Symbol() as any] = {})
+      apisMap.set(
+        dataKey,
+        createCache({
+          store: data,
+          transform,
+          request,
+          labelField,
+          keyField,
+        })
+      )
+    }
+    return apisMap.get(dataKey)
+  }
+
   return {
-    produceBatch: <T extends Obj<Fn | CacheParam>>(apis: T) =>
-      registBatch(apis, { store, transform }),
-    produce: <T extends Obj, P extends any[]>(
-      api: CacheParam<T, P> | CacheParam<T, P>['request']
-    ) => {
-      const { request, name, keyField, labelField }: CacheParam =
-        typeof api === 'function' ? { request: api } : api
-      const dataKey = name || request
-      if (!apisMap.has(dataKey)) {
-        const data = (store[Symbol() as any] = {})
-        apisMap.set(
-          dataKey,
-          createCache<T, P>({
-            store: data,
-            transform,
-            request,
-            labelField,
-            keyField,
-          })
-        )
-      }
-      return apisMap.get(dataKey) as (...args: P) => CacheResult<T>
-    },
+    produceBatch: <T extends Obj<Fn | CacheParam>>(apis: T) => registBatch(apis, { store, transform }),
+    produce,
   }
 }
 
 function produce<T extends Obj<Fn | CacheParam>>(config: T) {
   const caches: {
-    [K in keyof T]: (
-      ...args: Parameters<GetRequest<T[K]>>
-    ) => CacheResult<RequestReturn<T[K]>>
+    [K in keyof T]: (...args: Parameters<GetRequest<T[K]>>) => CacheResult<RequestReturn<T[K]>>
   } = {} as any
 
   Object.keys(config).forEach((key) => {
@@ -245,9 +246,7 @@ function produce<T extends Obj<Fn | CacheParam>>(config: T) {
   return caches
 }
 
-function cacheProduce<T extends Obj, P extends any[]>(
-  api: CacheParam<T, P> | ((...arg: P) => Promise<T>)
-) {
+function cacheProduce<T extends Obj, P extends any[]>(api: CacheParam<T, P> | ((...arg: P) => Promise<T>)) {
   const config = typeof api === 'function' ? { request: api } : api
   return (...args: P): CacheResult<T> => {
     const payload = args[0]
