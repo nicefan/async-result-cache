@@ -46,9 +46,9 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
   private _map?: DictMap<T>
   private _result?: T
   load: () => Promise<SyncData<T>>
-  constructor(request: Fn<Promise<any>>, param?: any)
-  constructor(config: CacheParam, param?: any)
-  constructor(config: Fn<Promise<any>> | CacheParam, param?: any) {
+  constructor(request: Fn<Promise<any>>, ...param)
+  constructor(config: CacheParam, ...param)
+  constructor(config: Fn<Promise<any>> | CacheParam, ...param) {
     let status: SyncData<T>['status'] = 'ready'
     let delay = false
     let _promise: Promise<SyncData<T>>
@@ -62,7 +62,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
       if (status !== 'ready') return _promise
       status = 'pending'
       delay = true
-      return (_promise = request(param)
+      return (_promise = request(...param)
         .then((res) => {
           status = 'loaded'
           const info = {
@@ -155,8 +155,7 @@ export function createCache(api: any) {
     const key = JSON.stringify(args)
     let cache = Reflect.get(store, key)
     if (!cache) {
-      const payload = args[0]
-      cache = new CacheResult({ request, keyField, labelField }, payload)
+      cache = new CacheResult({ request, keyField, labelField }, ...args)
       if (transform) cache = transform(cache)
       Reflect.set(store, key, cache)
     }
@@ -249,7 +248,6 @@ function produce<T extends Obj<Fn | CacheParam>>(config: T) {
 function cacheProduce<T extends Obj, P extends any[]>(api: CacheParam<T, P> | ((...arg: P) => Promise<T>)) {
   const config = typeof api === 'function' ? { request: api } : api
   return (...args: P): CacheResult<T> => {
-    const payload = args[0]
-    return new CacheResult(config, payload)
+    return new CacheResult(config, ...args)
   }
 }
