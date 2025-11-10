@@ -42,9 +42,10 @@ interface SyncData<T> {
   labelField?: string
 }
 type DictMap<T> = T extends any[] ? Record<string, T[0] extends { value: any; label: string } ? string : T[0]> : T
+
 export class CacheResult<T extends Obj | Obj[] = Obj> {
-  private _map?: DictMap<T>
-  private _result?: T
+
+  /* 异步获取缓存原始数据 */
   load: () => Promise<SyncData<T>>
   constructor(request: Fn<Promise<any>>, ...param)
   constructor(config: CacheParam, ...param)
@@ -52,12 +53,19 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     let status: SyncData<T>['status'] = 'ready'
     let delay = false
     let _promise: Promise<SyncData<T>>
+    Object.defineProperties(this, {
+      '_refresh': { writable: true, value: false},
+      '_map': { writable: true, value: undefined},
+      '_result': { writable: true, value: undefined},
+    })
+
     const _config: CacheParam = typeof config === 'function' ? { request: config } : config
     const { request, keyField, labelField } = _config
     const reload = () => {
       status = 'ready'
       return delay ? _promise : this.load()
     }
+
     this.load = () => {
       if (status !== 'ready') return _promise
       status = 'pending'
@@ -65,6 +73,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
       return (_promise = request(...param)
         .then((res) => {
           status = 'loaded'
+          this['_refresh'] = true
           const info = {
             status,
             res,
@@ -86,53 +95,59 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     this.load()
   }
 
+  /** 重新缓存数据，返回原始数据 */
   reload() {
     return this.load().then(({ reload }) => {
       return reload().then((result) => {
         if (result.status === 'loaded') {
-          this._result = result.res
-          if (this._map) this.getMap()
+          this['_result'] = result.res
+          if (this['_map']) this.getMap()
         }
         return result
       })
     })
   }
 
+  /** 异步获取缓存数据，若缓存不存在则重新缓存 */
   getResult() {
     return this.load()
       .then((result) => (result.status === 'error' ? this.reload() : result))
       .then(({ res, keyField = 'value', labelField }) => {
-        // 取值时进行赋值，被vue代理时this对象为代理对象，可监测数据变化，在构造时this为原始对象，赋值不会响应。
-        if (labelField) {
-          this._result = res?.map((item) => ({
-            id: item.id,
-            value: item[keyField] ?? item.id,
-            label: item[labelField],
-          }))
-        } else {
-          this._result = res
+        if (this['_refresh']) {
+          this['_refresh'] = false
+          // 取值时进行赋值，被vue代理时this对象为代理对象，可监测数据变化，在构造时this为原始对象，赋值不会响应。
+          if (labelField) {
+            this['_result'] = res?.map((item) => ({
+              original: item,
+              value: item[keyField] ?? item.id,
+              label: item[labelField],
+            }))
+          } else {
+            this['_result'] = res
+          }
         }
-        return this._result as T
+        return this['_result'] as T
       })
   }
 
   get result() {
     this.getResult()
-    return this._result
+    return this['_result']
   }
 
+  /** 将缓存数据转换为字典映射 */
   getMap() {
     return this.load().then(({ res = [], keyField, labelField }) => {
-      if (!this._map) {
-        return (this._map = buildMap(res, keyField, labelField) as DictMap<T>)
+      if (!this['_map']) {
+        return (this['_map'] = buildMap(res, keyField, labelField) as DictMap<T>)
       }
-      return this._map || {}
+      return this['_map'] || {}
     })
   }
 
   get map() {
     this.getMap()
-    return this._map || ({} as DictMap<T>)
+    return this['_map'] || ({} as DictMap<T>)
   }
 }
 
@@ -247,7 +262,22 @@ function produce<T extends Obj<Fn | CacheParam>>(config: T) {
 
 function cacheProduce<T extends Obj, P extends any[]>(api: CacheParam<T, P> | ((...arg: P) => Promise<T>)) {
   const config = typeof api === 'function' ? { request: api } : api
-  return (...args: P): CacheResult<T> => {
-    return new CacheResult(config, ...args)
+  return (...args: P) => {
+    const cache = new CacheResult<T>(config, ...args)
+    let result = cache.result
+    const obj: Obj = {
+      load: () => cache.load(),
+      reload: () => cache.reload(),
+      getResult: () => cache.getResult(),
+      get result() {
+        cache.getResult().then((res) => (result = res))
+        return result
+      },
+      getMap: () => cache.getMap(),
+      get map() {
+        return cache.map
+      },
+    }
+    return obj as CacheResult<T>
   }
 }
