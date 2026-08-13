@@ -1,6 +1,6 @@
 type DataType = 'dict' | 'record' | void
 function checkType(item?: Obj, key?: string, labelField?: string): DataType {
-  if (typeof item === 'object') {
+  if (item && typeof item === 'object') {
     return (key && labelField) || ('value' in item && 'label' in item)
       ? 'dict'
       : key && key in item
@@ -15,12 +15,12 @@ function buildMap(list, keyField?: string, labelField?: string) {
     const map: Obj = {}
     for (const item of list) {
       if (dataType === 'record') {
-        const key = keyField || 'id'
-        if (item[key]) map[key] = item
+        const value = item[keyField as string]
+        if (value !== undefined && value !== null) map[value] = item
       } else if (dataType === 'dict') {
         const key = item[keyField || 'value']
         const label = item[labelField || 'label']
-        map[key] = label
+        if (key !== undefined && key !== null) map[key] = label
       }
     }
     return map
@@ -44,7 +44,6 @@ interface SyncData<T> {
 type DictMap<T> = T extends any[] ? Record<string, T[0] extends { value: any; label: string } ? string : T[0]> : T
 
 export class CacheResult<T extends Obj | Obj[] = Obj> {
-
   /* 异步获取缓存原始数据 */
   load: () => Promise<SyncData<T>>
   constructor(request: Fn<Promise<any>>, ...param)
@@ -54,9 +53,9 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
     let delay = false
     let _promise: Promise<SyncData<T>>
     Object.defineProperties(this, {
-      '_refresh': { writable: true, value: false},
-      '_map': { writable: true, value: undefined},
-      '_result': { writable: true, value: undefined},
+      _refresh: { writable: true, value: false },
+      _map: { writable: true, value: undefined },
+      _result: { writable: true, value: undefined },
     })
 
     const _config: CacheParam = typeof config === 'function' ? { request: config } : config
@@ -101,7 +100,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
       return reload().then((result) => {
         if (result.status === 'loaded') {
           this['_result'] = result.res
-          if (this['_map']) this.getMap()
+          if (this['_map']) this.getMap(true)
         }
         return result
       })
@@ -112,14 +111,14 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
   getResult() {
     return this.load()
       .then((result) => (result.status === 'error' ? this.reload() : result))
-      .then(({ res, keyField = 'value', labelField }) => {
+      .then(({ res, keyField, labelField }) => {
         if (this['_refresh']) {
           this['_refresh'] = false
           // 取值时进行赋值，被vue代理时this对象为代理对象，可监测数据变化，在构造时this为原始对象，赋值不会响应。
-          if (labelField) {
+          if (keyField && labelField) {
             this['_result'] = res?.map((item) => ({
               original: item,
-              value: item[keyField] ?? item.id,
+              value: item[keyField],
               label: item[labelField],
             }))
           } else {
@@ -136,9 +135,9 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
   }
 
   /** 将缓存数据转换为字典映射 */
-  getMap() {
+  getMap(force?: boolean) {
     return this.load().then(({ res = [], keyField, labelField }) => {
-      if (!this['_map']) {
+      if (!this['_map'] || force) {
         return (this['_map'] = buildMap(res, keyField, labelField) as DictMap<T>)
       }
       return this['_map'] || {}
@@ -147,7 +146,7 @@ export class CacheResult<T extends Obj | Obj[] = Obj> {
 
   get map() {
     this.getMap()
-    return this['_map'] || ({} as DictMap<T>)
+    return (this['_map'] || {}) as DictMap<T>
   }
 }
 
@@ -156,9 +155,12 @@ type CacheConfig<T extends Obj, P extends any[]> = {
   transform?: (data: CacheResult<T>) => Obj
 } & CacheParam<T, P>
 
-export function createCache<P extends any[], R extends Obj<any>[], L extends string>(
-  api: CacheConfig<R, P> & { labelField: L }
-): (...args: P) => CacheResult<Dict<R[0][`${L}`]>[]>
+export function createCache<
+  P extends any[],
+  R extends Obj<any>[],
+  K extends keyof R[0] & string,
+  L extends keyof R[0] & string
+>(api: CacheConfig<R, P> & { keyField: K; labelField: L }): (...args: P) => CacheResult<Dict<R[0][K]>[]>
 export function createCache<R extends Obj, P extends any[]>(
   api: CacheConfig<R, P> | ((...args: P) => Promise<R>)
 ): (...args: P) => CacheResult<R>
@@ -213,9 +215,11 @@ type Dict<T = any> = {
   value: T
 }
 type CacheProduce<> = {
-  <P extends any[], R extends Obj<any>[], L extends string>(api: CacheParam<R, P> & { labelField: L }): (
+  <P extends any[], R extends Obj<any>[], K extends keyof R[0] & string, L extends keyof R[0] & string>(
+    api: CacheParam<R, P> & { keyField: K; labelField: L }
+  ): (
     ...args: P
-  ) => CacheResult<Dict<R[0][`${L}`]>[]>
+  ) => CacheResult<Dict<R[0][K]>[]>
   <P extends any[], R extends Obj<any>>(api: CacheParam<R, P> | ((...args: P) => Promise<R>)): (
     ...args: P
   ) => CacheResult<R>
