@@ -2,7 +2,7 @@ import {
   CacheResult,
   createCache,
   createCacheStore,
-  registBatch,
+  registerBatch,
   type CacheParam,
 } from '../src/index'
 
@@ -20,7 +20,7 @@ const mapped = createCache({
 })
 mapped().getResult()
 
-const batch = registBatch({ request })
+const batch = registerBatch({ request })
 batch.request(1)
 
 const store = createCacheStore({})

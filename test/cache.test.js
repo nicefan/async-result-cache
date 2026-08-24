@@ -5,7 +5,7 @@ import {
   CacheResult,
   createCache,
   createCacheStore,
-  registBatch,
+  registerBatch,
 } from '../dist/index.js'
 
 test('createCache reuses results with the same arguments', async () => {
@@ -85,8 +85,8 @@ test('getMap builds record and dictionary mappings', async () => {
   ])
 })
 
-test('registBatch and createCacheStore isolate request stores', async () => {
-  const batch = registBatch({
+test('registerBatch and createCacheStore isolate request stores', async () => {
+  const batch = registerBatch({
     user: async (id) => ({ id }),
     roles: async () => [{ value: 'admin', label: 'Admin' }],
   })

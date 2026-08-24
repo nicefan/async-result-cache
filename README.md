@@ -116,7 +116,7 @@ const cacheStore = createCacheStore({
 | `CacheResult` | 管理单个异步结果的加载、读取、刷新和映射 |
 | `createCache` | 按参数创建并复用 `CacheResult` |
 | `createCacheStore` | 创建共享 Store，并提供 `produce`、`produceBatch` |
-| `registBatch` | 一次注册多个异步缓存方法；名称为兼容原 API 而保留 |
+| `registerBatch` | 一次注册多个异步缓存方法 |
 
 ## 许可证
 
