@@ -1,0 +1,58 @@
+{
+  "name": "async-result-cache",
+  "version": "1.0.0",
+  "description": "Cache, deduplicate, refresh, and map asynchronous request results.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm run build && node --test test/*.test.js",
+    "check": "pnpm run typecheck && pnpm run test",
+    "prepublishOnly": "pnpm run check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicefan/async-result-cache.git"
+  },
+  "homepage": "https://github.com/nicefan/async-result-cache#readme",
+  "bugs": {
+    "url": "https://github.com/nicefan/async-result-cache/issues"
+  },
+  "keywords": [
+    "async",
+    "cache",
+    "request",
+    "deduplication",
+    "typescript"
+  ],
+  "author": {
+    "name": "nicefan",
+    "email": "covien@msn.com"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@10.15.0",
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
+  }
+}
