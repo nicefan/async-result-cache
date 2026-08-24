@@ -1,27 +1,40 @@
 import { createCache } from './createCache'
-import type { CacheResult } from './cacheResult'
+import type { CacheEntry } from './cacheResult'
 import type {
-  CacheParam,
-  Dict,
+  CacheOptions,
+  DictionaryOption,
   Fn,
   GetRequest,
   Obj,
   RequestReturn,
 } from './types'
 
-export type CacheStoreConfig = {
+export type CacheRegistryOptions = {
   store?: Obj
-  transform?: (data: CacheResult) => Obj
+  transform?: (data: CacheEntry<any, any>) => Obj
 }
 
-export function registerBatch<T extends Obj<Fn | CacheParam>>(
+type CacheEntryFor<T extends Fn | CacheOptions> = T extends {
+  keyField: infer K
+  labelField: infer L
+}
+  ? RequestReturn<T> extends (infer Item extends Obj)[]
+    ? K extends keyof Item
+      ? L extends keyof Item
+        ? CacheEntry<RequestReturn<T>, DictionaryOption<Item, K, L>[]>
+        : CacheEntry<RequestReturn<T>>
+      : CacheEntry<RequestReturn<T>>
+    : CacheEntry<RequestReturn<T>>
+  : CacheEntry<RequestReturn<T>>
+
+export function createCaches<const T extends Obj<Fn | CacheOptions>>(
   apis: T,
-  config: CacheStoreConfig = {}
+  config: CacheRegistryOptions = {}
 ) {
   const { store = {}, transform } = config
 
   const methods: {
-    [K in keyof T]: (...args: Parameters<GetRequest<T[K]>>) => CacheResult<RequestReturn<T[K]>>
+    [K in keyof T]: (...args: Parameters<GetRequest<T[K]>>) => CacheEntryFor<T[K]>
   } = {} as any
 
   Object.keys(apis).forEach((key) => {
@@ -37,22 +50,22 @@ export function registerBatch<T extends Obj<Fn | CacheParam>>(
   return methods
 }
 
-type CacheProduce = {
+type CacheRegister = {
   <P extends any[], R extends Obj<any>[], K extends keyof R[0] & string, L extends keyof R[0] & string>(
-    api: CacheParam<R, P> & { keyField: K; labelField: L }
-  ): (...args: P) => CacheResult<Dict<R[0][K]>[]>
+    api: CacheOptions<R, P> & { keyField: K; labelField: L }
+  ): (...args: P) => CacheEntry<R, DictionaryOption<R[0], K, L>[]>
 
   <P extends any[], R extends Obj<any>>(
-    api: CacheParam<R, P> | ((...args: P) => Promise<R>)
-  ): (...args: P) => CacheResult<R>
+    api: CacheOptions<R, P> | ((...args: P) => Promise<R>)
+  ): (...args: P) => CacheEntry<R>
 }
 
-export function createCacheStore(config: CacheStoreConfig) {
+export function createCacheRegistry(config: CacheRegistryOptions) {
   const { store = {}, transform } = config
   const apisMap = new Map()
 
-  const produce: CacheProduce = (api: any) => {
-    const { request, name, keyField, labelField }: CacheParam =
+  const register: CacheRegister = (api: any) => {
+    const { request, name, keyField, labelField }: CacheOptions =
       typeof api === 'function' ? { request: api } : api
     const dataKey = name || request
     if (!apisMap.has(dataKey)) {
@@ -72,8 +85,8 @@ export function createCacheStore(config: CacheStoreConfig) {
   }
 
   return {
-    produceBatch: <T extends Obj<Fn | CacheParam>>(apis: T) =>
-      registerBatch(apis, { store, transform }),
-    produce,
+    registerAll: <const T extends Obj<Fn | CacheOptions>>(apis: T) =>
+      createCaches(apis, { store, transform }),
+    register,
   }
 }

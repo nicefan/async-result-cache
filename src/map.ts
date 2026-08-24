@@ -15,7 +15,7 @@ function checkType(item?: Obj, key?: string, labelField?: string): DataType {
 export function buildMap(list: Obj[], keyField?: string, labelField?: string) {
   const dataType = checkType(list?.[0], keyField, labelField)
   if (dataType && list.length > 0) {
-    const map: Obj = {}
+    const map: Obj = Object.create(null)
     for (const item of list) {
       if (dataType === 'record') {
         const value = item[keyField as string]

@@ -1,114 +1,160 @@
 import { buildMap } from './map'
-import type { CacheParam, DictMap, Fn, Obj, SyncData } from './types'
+import type { CacheOptions, CacheStatus, DictMap, Fn, Obj } from './types'
 
-export class CacheResult<T extends Obj | Obj[] = Obj> {
-  private declare _refresh: boolean
-  private declare _map: DictMap<T> | undefined
-  private declare _result: T | undefined
+export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw> {
+  private _cachedData: Raw | undefined
+  private _inFlight: Promise<Raw> | undefined
+  private _map: DictMap<Result> | undefined
+  private _result: Result | undefined
+  private _status: CacheStatus = 'ready'
+  private _error: unknown
+  private _requestId = 0
+  private readonly _request: (...args: any[]) => Promise<Raw>
+  private readonly _param: any[]
+  private readonly _keyField?: string
+  private readonly _labelField?: string
+  private readonly _resultPromises = new WeakMap<Promise<Raw>, Promise<Result>>()
 
-  /* 异步获取缓存原始数据 */
-  load: () => Promise<SyncData<T>>
+  constructor(request: Fn<Promise<Raw>>, ...param: any[])
+  constructor(config: CacheOptions<Raw>, ...param: any[])
+  constructor(config: Fn<Promise<Raw>> | CacheOptions<Raw>, ...param: any[]) {
+    const cacheConfig: CacheOptions<Raw> =
+      typeof config === 'function' ? { request: config } : config
 
-  constructor(request: Fn<Promise<any>>, ...param: any[])
-  constructor(config: CacheParam, ...param: any[])
-  constructor(config: Fn<Promise<any>> | CacheParam, ...param: any[]) {
-    let status: SyncData<T>['status'] = 'ready'
-    let delay = false
-    let _promise: Promise<SyncData<T>>
-    Object.defineProperties(this, {
-      _refresh: { writable: true, value: false },
-      _map: { writable: true, value: undefined },
-      _result: { writable: true, value: undefined },
-    })
+    this._request = cacheConfig.request
+    this._param = param
+    this._keyField = cacheConfig.keyField
+    this._labelField = cacheConfig.labelField
 
-    const _config: CacheParam = typeof config === 'function' ? { request: config } : config
-    const { request, keyField, labelField } = _config
-    const reload = () => {
-      status = 'ready'
-      return delay ? _promise : this.load()
+    // 保持创建时预加载；在调用方读取前处理拒绝，避免未处理拒绝警告。
+    void this.startLoad().catch(() => undefined)
+  }
+
+  get status() {
+    return this._status
+  }
+
+  get error() {
+    return this._error
+  }
+
+  private startLoad() {
+    if (this._inFlight) return this._inFlight
+
+    const requestId = ++this._requestId
+    this._status = 'pending'
+    this._error = undefined
+
+    let requestPromise: Promise<Raw>
+    try {
+      requestPromise = Promise.resolve(this._request(...this._param))
+    } catch (error) {
+      requestPromise = Promise.reject(error)
     }
 
-    this.load = () => {
-      if (status !== 'ready') return _promise
-      status = 'pending'
-      delay = true
-      return (_promise = request(...param)
-        .then((res) => {
-          status = 'loaded'
-          this._refresh = true
-          return {
-            status,
-            res,
-            keyField,
-            labelField,
-            reload,
-          }
-        })
-        .catch(() => {
-          status = 'error'
-          return { status, reload }
-        }))
-        .finally(() => {
-          setTimeout(() => {
-            delay = false
-          }, 1000)
-        })
+    const promise = requestPromise
+      .then((res) => {
+        if (requestId === this._requestId) {
+          this._cachedData = res
+          this._map = undefined
+          this._status = 'loaded'
+        }
+        return res
+      })
+      .catch((error: unknown) => {
+        if (requestId === this._requestId) {
+          this._status = 'error'
+          this._error = error
+        }
+        throw error
+      })
+      .finally(() => {
+        if (this._inFlight === promise) this._inFlight = undefined
+      })
+
+    this._inFlight = promise
+    return promise
+  }
+
+  private getRawResult() {
+    if (this._inFlight) return this._inFlight
+    if (this._cachedData !== undefined) return Promise.resolve(this._cachedData)
+    if (this._status === 'error') return Promise.reject(this._error)
+    return this.startLoad()
+  }
+
+  private transformResult(res: Raw): Result {
+    if (Array.isArray(res) && this._keyField && this._labelField) {
+      return res.map((item) => ({
+        original: item,
+        value: item[this._keyField as string],
+        label: item[this._labelField as string],
+      })) as unknown as Result
     }
-    this.load()
+    return res as unknown as Result
   }
 
-  /** 重新缓存数据，返回原始数据 */
-  reload() {
-    return this.load().then(({ reload }) => {
-      return reload().then((result) => {
-        if (result.status === 'loaded') {
-          this._result = result.res
-          if (this._map) this.getMap(true)
-        }
-        return result
-      })
+  private resolveResult(rawPromise: Promise<Raw>, requestId: number) {
+    const existing = this._resultPromises.get(rawPromise)
+    if (existing) return existing
+
+    const promise = rawPromise.then((res) => {
+      const result = this.transformResult(res)
+      if (requestId === this._requestId) this._result = result
+      return result
     })
+    this._resultPromises.set(rawPromise, promise)
+    return promise
   }
 
-  /** 异步获取缓存数据，若缓存不存在则重新缓存 */
-  getResult() {
-    return this.load()
-      .then((result) => (result.status === 'error' ? this.reload() : result))
-      .then(({ res, keyField, labelField }) => {
-        if (this._refresh) {
-          this._refresh = false
-          // 取值时进行赋值，被 Vue 代理时 this 对象为代理对象，可监测数据变化。
-          if (keyField && labelField) {
-            this._result = (res as Obj[] | undefined)?.map((item) => ({
-              original: item,
-              value: item[keyField],
-              label: item[labelField],
-            })) as unknown as T
-          } else {
-            this._result = res
-          }
-        }
-        return this._result as T
-      })
+  /** 获取缓存结果；没有缓存时等待首次请求，不会在失败后自动重试。 */
+  getResult(): Promise<Result> {
+    if (!this._inFlight && this._result !== undefined) return Promise.resolve(this._result)
+
+    const rawPromise = this.getRawResult()
+    return this.resolveResult(rawPromise, this._requestId)
   }
 
-  get result() {
-    this.getResult()
+  /** 主动刷新并返回新结果；仅合并仍在进行中的请求。 */
+  reload(): Promise<Result> {
+    const rawPromise = this.startLoad()
+    return this.resolveResult(rawPromise, this._requestId)
+  }
+
+  /** 清除缓存；进行中的底层请求不会取消，但其结果不会重新写入缓存。 */
+  clear() {
+    this._requestId += 1
+    this._cachedData = undefined
+    this._inFlight = undefined
+    this._map = undefined
+    this._result = undefined
+    this._error = undefined
+    this._status = 'ready'
+  }
+
+  get result(): Result | undefined {
+    void this.getResult().catch(() => undefined)
     return this._result
   }
 
-  /** 将缓存数据转换为字典映射 */
-  getMap(force?: boolean) {
-    return this.load().then(({ res, keyField, labelField }) => {
-      if (!this._map || force) {
-        return (this._map = buildMap((res || []) as Obj[], keyField, labelField) as DictMap<T>)
-      }
-      return this._map || {}
-    })
+  /** 将缓存的原始数组转换为字典映射。 */
+  async getMap(force = false): Promise<DictMap<Result>> {
+    if (!this._inFlight && this._map !== undefined && !force) return this._map
+
+    const requestId = this._requestId
+    const res = await this.getRawResult()
+    const map = (buildMap(
+      (Array.isArray(res) ? res : []) as Obj[],
+      this._keyField,
+      this._labelField
+    ) || Object.create(null)) as DictMap<Result>
+
+    if (requestId === this._requestId) this._map = map
+    return map
   }
 
-  get map() {
-    this.getMap()
-    return (this._map || {}) as DictMap<T>
+  get map(): DictMap<Result> {
+    void this.getMap().catch(() => undefined)
+    return (this._map || Object.create(null)) as DictMap<Result>
   }
 }
