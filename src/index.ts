@@ -1,6 +1,9 @@
-export { CacheEntry } from './cacheResult'
-export { createCache } from './createCache'
-export { createCacheRegistry, createCaches } from './cacheStore'
+export { createCache as default, createCache } from './createCache'
 
-export type { CacheOptions, CacheStatus, DictionaryOption } from './types'
-export type { CacheRegistryOptions } from './cacheStore'
+export type {
+  CacheFactory,
+  CacheOptions,
+  CacheResult,
+  DictionaryOption,
+  DictMap,
+} from './types'

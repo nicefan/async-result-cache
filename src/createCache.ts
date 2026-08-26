@@ -1,40 +1,88 @@
 import { CacheEntry } from './cacheResult'
-import type { CacheOptions, DictionaryOption, Obj } from './types'
+import type {
+  CacheFactory,
+  CacheOptions,
+  CacheResult,
+  Fn,
+  Obj,
+} from './types'
 
-type CacheConfig<T extends Obj | Obj[], P extends any[], Result = T> = {
-  store?: Obj
-  transform?: (data: CacheEntry<T, Result>) => Obj
-} & CacheOptions<T, P>
+type CacheApi = Fn<Promise<Obj>> | CacheOptions<Obj>
 
-export function createCache<
-  P extends any[],
-  R extends Obj<any>[],
-  K extends keyof R[0] & string,
-  L extends keyof R[0] & string
->(
-  api: CacheConfig<R, P, DictionaryOption<R[0], K, L>[]> & {
-    keyField: K
-    labelField: L
-  }
-): (...args: P) => CacheEntry<R, DictionaryOption<R[0], K, L>[]>
+type Registration = {
+  request: Fn<Promise<Obj>>
+  cached: Fn<CacheResult>
+  clear: () => void
+}
 
-export function createCache<R extends Obj, P extends any[]>(
-  api: CacheConfig<R, P> | ((...args: P) => Promise<R>)
-): (...args: P) => CacheEntry<R>
+function normalize(api: CacheApi): CacheOptions<Obj> {
+  return typeof api === 'function' ? { request: api } : api
+}
 
-export function createCache(api: any) {
-  const config = typeof api === 'function' ? { request: api } : api
-  const { store = {}, transform, request, keyField, labelField } = config
+function createRegistration(options: CacheOptions<Obj>): Registration {
+  const entries = new Map<string, CacheEntry>()
 
-  const getData = (...args: any[]) => {
+  const cached = (...args: any[]) => {
     const key = JSON.stringify(args)
-    let cache = Reflect.get(store, key)
-    if (!cache) {
-      cache = new CacheEntry({ request, keyField, labelField }, ...args)
-      if (transform) cache = transform(cache)
-      Reflect.set(store, key, cache)
+    let entry = entries.get(key)
+    if (!entry) {
+      entry = new CacheEntry(options, ...args)
+      entries.set(key, entry)
     }
-    return cache
+    return entry
   }
-  return getData
+
+  return {
+    request: options.request,
+    cached,
+    clear: () => entries.forEach((entry) => entry.clear()),
+  }
+}
+
+export function createCache(): CacheFactory {
+  const registrations = new Set<Registration>()
+  const registrationsByName = new Map<string, Registration>()
+  const registrationsByRequest = new WeakMap<Fn, Registration>()
+
+  const register = (api: CacheApi) => {
+    const options = normalize(api)
+    const existing = options.name
+      ? registrationsByName.get(options.name)
+      : registrationsByRequest.get(options.request)
+
+    if (existing) {
+      if (existing.request !== options.request) {
+        throw new Error(`Cache name already registered: ${options.name}`)
+      }
+      return existing.cached
+    }
+
+    const registration = createRegistration(options)
+    registrations.add(registration)
+    if (!registrationsByRequest.has(options.request)) {
+      registrationsByRequest.set(options.request, registration)
+    }
+    if (options.name) registrationsByName.set(options.name, registration)
+    return registration.cached
+  }
+
+  const registerGroup = (apis: Record<string, CacheApi>) => {
+    const cached: Record<string, Fn<CacheResult>> = Object.create(null)
+    Object.keys(apis).forEach((name) => {
+      const options = normalize(apis[name])
+      cached[name] = register({ ...options, name })
+    })
+    return cached
+  }
+
+  return {
+    register: register as CacheFactory['register'],
+    registerGroup: registerGroup as CacheFactory['registerGroup'],
+    clear(name: string) {
+      registrationsByName.get(name)?.clear()
+    },
+    clearAll() {
+      registrations.forEach((registration) => registration.clear())
+    },
+  }
 }

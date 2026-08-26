@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import {
-  CacheEntry,
-  createCache,
-  createCacheRegistry,
-  createCaches,
-} from '../dist/index.js'
+import createCache, { createCache as createNamedCache } from '../dist/index.js'
 
-test('createCache reuses results with the same arguments', async () => {
+test('exports createCache as default and named API', () => {
+  assert.equal(createCache, createNamedCache)
+})
+
+test('register reuses APIs and entries', async () => {
+  const cache = createCache()
   let calls = 0
-  const getUser = createCache(async (id) => {
+  const request = async (id) => {
     calls += 1
     return { id, name: `user-${id}` }
-  })
+  }
+
+  const getUser = cache.register(request)
+  assert.equal(cache.register(request), getUser)
 
   const first = getUser(1)
   const second = getUser(1)
@@ -26,119 +29,127 @@ test('createCache reuses results with the same arguments', async () => {
   assert.equal(calls, 2)
 })
 
-test('CacheEntry deduplicates concurrent loads', async () => {
+test('entries deduplicate concurrent loads', async () => {
+  const cache = createCache()
   let resolveRequest
   let calls = 0
-  const cache = new CacheEntry(() => {
+  const getData = cache.register(() => {
     calls += 1
     return new Promise((resolve) => {
       resolveRequest = resolve
     })
   })
 
-  const first = cache.getResult()
-  const second = cache.getResult()
+  const entry = getData()
+  const first = entry.getResult()
+  const second = entry.getResult()
+
   assert.equal(first, second)
   assert.equal(calls, 1)
 
   resolveRequest({ ok: true })
   assert.deepEqual(await first, { ok: true })
-  assert.deepEqual(await cache.getResult(), { ok: true })
+  assert.deepEqual(await entry.getResult(), { ok: true })
 })
 
-test('reload starts a fresh request immediately after the previous request settles', async () => {
-  let calls = 0
-  const cache = new CacheEntry(async () => ({ value: ++calls }))
+test('result and map snapshots are synchronous and stable after loading', async () => {
+  const cache = createCache()
+  const getItems = cache.register({
+    request: async () => [{ id: 1, name: 'one' }],
+    keyField: 'id',
+    labelField: 'name',
+  })
+  const entry = getItems()
 
-  const initial = cache.getResult()
-  assert.deepEqual(await initial, { value: 1 })
+  await new Promise((resolve) => setImmediate(resolve))
 
-  const refreshed = cache.reload()
-  assert.notEqual(refreshed, initial)
-  assert.equal(calls, 2)
-  assert.deepEqual(await refreshed, { value: 2 })
+  const result = entry.result
+  const map = entry.map
+  assert.deepEqual(result, [
+    {
+      original: { id: 1, name: 'one' },
+      value: 1,
+      label: 'one',
+    },
+  ])
+  assert.deepEqual(map, Object.assign(Object.create(null), { 1: 'one' }))
+  assert.equal(entry.result, result)
+  assert.equal(entry.map, map)
 })
 
-test('reload only merges requests that are still in progress', async () => {
+test('reload starts a new request after settlement and merges active requests', async () => {
+  const cache = createCache()
   const resolvers = []
   let calls = 0
-  const cache = new CacheEntry(() => {
+  const entry = cache.register(() => {
     calls += 1
     return new Promise((resolve) => resolvers.push(resolve))
-  })
+  })()
 
-  const initial = cache.getResult()
-  assert.equal(cache.reload(), initial)
-  assert.equal(calls, 1)
-
+  const initial = entry.getResult()
+  assert.equal(entry.reload(), initial)
   resolvers[0]({ value: 1 })
-  await initial
+  assert.deepEqual(await initial, { value: 1 })
 
-  const refreshed = cache.reload()
-  assert.equal(cache.reload(), refreshed)
+  const refreshed = entry.reload()
+  assert.equal(entry.reload(), refreshed)
   assert.equal(calls, 2)
   resolvers[1]({ value: 2 })
   assert.deepEqual(await refreshed, { value: 2 })
 })
 
-test('an initial failure rejects without an implicit retry', async () => {
-  const expected = new Error('initial request failed')
-  let calls = 0
-  const cache = new CacheEntry(async () => {
-    calls += 1
-    throw expected
-  })
+test('failures reject and a failed reload preserves successful snapshots', async () => {
+  const cache = createCache()
+  const initialError = new Error('initial failure')
+  let initialCalls = 0
+  const failed = cache.register(async () => {
+    initialCalls += 1
+    throw initialError
+  })()
 
-  await assert.rejects(cache.getResult(), expected)
-  assert.equal(cache.status, 'error')
-  assert.equal(cache.error, expected)
-  assert.equal(calls, 1)
+  await assert.rejects(failed.getResult(), initialError)
+  await assert.rejects(failed.getResult(), initialError)
+  assert.equal(initialCalls, 1)
 
-  await assert.rejects(cache.getResult(), expected)
-  assert.equal(calls, 1)
-})
-
-test('a failed reload preserves the last successful result and map', async () => {
-  const expected = new Error('refresh failed')
-  let calls = 0
-  const cache = new CacheEntry({
+  const reloadError = new Error('reload failure')
+  let reloadCalls = 0
+  const entry = cache.register({
     request: async () => {
-      calls += 1
-      if (calls > 1) throw expected
-      return [{ id: 1, name: 'cached' }]
+      reloadCalls += 1
+      if (reloadCalls > 1) throw reloadError
+      return [{ id: 1 }]
     },
     keyField: 'id',
-  })
+  })()
 
-  const result = await cache.getResult()
-  const map = await cache.getMap()
-  await assert.rejects(cache.reload(), expected)
-
-  assert.equal(cache.status, 'error')
-  assert.equal(cache.error, expected)
-  assert.equal(cache.result, result)
-  assert.equal(cache.map, map)
-  assert.equal(await cache.getResult(), result)
-  assert.equal(calls, 2)
+  const result = await entry.getResult()
+  const map = await entry.getMap()
+  await assert.rejects(entry.reload(), reloadError)
+  assert.equal(entry.result, result)
+  assert.equal(entry.map, map)
+  assert.equal(await entry.getResult(), result)
 })
 
-test('clear invalidates pending result and map writes without cancelling callers', async () => {
+test('entry clear keeps identity and discards pending cache writes', async () => {
+  const cache = createCache()
   const resolvers = []
   let calls = 0
-  const cache = new CacheEntry({
+  const getItems = cache.register({
     request: () => {
       calls += 1
       return new Promise((resolve) => resolvers.push(resolve))
     },
     keyField: 'id',
   })
+  const entry = getItems()
+  const staleResult = entry.getResult()
+  const staleMap = entry.getMap()
 
-  const staleResult = cache.getResult()
-  const staleMap = cache.getMap()
-  cache.clear()
+  entry.clear()
+  assert.equal(getItems(), entry)
 
-  const currentResult = cache.getResult()
-  const currentMap = cache.getMap()
+  const currentResult = entry.getResult()
+  const currentMap = entry.getMap()
   assert.equal(calls, 2)
 
   resolvers[1]([{ id: 'new' }])
@@ -149,98 +160,71 @@ test('clear invalidates pending result and map writes without cancelling callers
   )
 
   resolvers[0]([{ id: 'old' }])
-  assert.deepEqual(await staleResult, [{ id: 'old' }])
+  await staleResult
   await staleMap
-
-  assert.deepEqual(cache.result, [{ id: 'new' }])
+  assert.deepEqual(entry.result, [{ id: 'new' }])
   assert.deepEqual(
-    cache.map,
+    entry.map,
     Object.assign(Object.create(null), { new: { id: 'new' } })
   )
 })
 
-test('getMap builds record and dictionary mappings', async () => {
-  const records = createCache({
-    request: async () => [
-      { id: 1, name: 'one' },
-      { id: 2, name: 'two' },
-    ],
-    keyField: 'id',
-  })()
-  const dictionary = createCache({
-    request: async () => [
-      { code: 'on', title: 'Enabled' },
-      { code: 'off', title: 'Disabled' },
-    ],
-    keyField: 'code',
-    labelField: 'title',
-  })()
+test('factory clear invalidates one named API and clearAll invalidates every API', async () => {
+  const cache = createCache()
+  let userCalls = 0
+  let roleCalls = 0
+  const apis = cache.registerGroup({
+    user: async (id) => ({ id, call: ++userCalls }),
+    role: async (id) => ({ id, call: ++roleCalls }),
+  })
 
-  assert.deepEqual(await records.getMap(), Object.assign(Object.create(null), {
-    1: { id: 1, name: 'one' },
-    2: { id: 2, name: 'two' },
-  }))
-  assert.deepEqual(await dictionary.getMap(), Object.assign(Object.create(null), {
-    on: 'Enabled',
-    off: 'Disabled',
-  }))
-  assert.deepEqual(await dictionary.getResult(), [
-    {
-      original: { code: 'on', title: 'Enabled' },
-      value: 'on',
-      label: 'Enabled',
-    },
-    {
-      original: { code: 'off', title: 'Disabled' },
-      value: 'off',
-      label: 'Disabled',
-    },
-  ])
+  const user = apis.user(1)
+  const role = apis.role(1)
+  assert.deepEqual(await user.getResult(), { id: 1, call: 1 })
+  assert.deepEqual(await role.getResult(), { id: 1, call: 1 })
+
+  cache.clear('user')
+  assert.equal(apis.user(1), user)
+  assert.deepEqual(await user.getResult(), { id: 1, call: 2 })
+  assert.equal(await role.getResult(), role.result)
+  assert.equal(roleCalls, 1)
+
+  cache.clearAll()
+  assert.deepEqual(await user.getResult(), { id: 1, call: 3 })
+  assert.deepEqual(await role.getResult(), { id: 1, call: 2 })
 })
 
-test('getMap returns safe empty maps for unsupported and empty results', async () => {
-  const objectResult = new CacheEntry(async () => ({ id: 1 }))
-  const emptyResult = new CacheEntry(async () => [])
+test('register rejects name conflicts', () => {
+  const cache = createCache()
+  cache.register({
+    name: 'user',
+    request: async ({ id }) => ({ id }),
+  })
 
-  const objectMap = await objectResult.getMap()
-  const emptyMap = await emptyResult.getMap()
+  assert.throws(
+    () => cache.register({ name: 'user', request: async () => ({}) }),
+    /Cache name already registered: user/
+  )
+})
+
+test('getMap returns null-prototype maps and safely stores __proto__', async () => {
+  const cache = createCache()
+  const objectEntry = cache.register(async () => ({ id: 1 }))()
+  const emptyEntry = cache.register(async () => [])()
+  const protoEntry = cache.register({
+    request: async () => [{ id: '__proto__', name: 'safe' }],
+    keyField: 'id',
+  })()
+
+  const objectMap = await objectEntry.getMap()
+  const emptyMap = await emptyEntry.getMap()
+  const protoMap = await protoEntry.getMap()
 
   assert.equal(Object.getPrototypeOf(objectMap), null)
   assert.equal(Object.getPrototypeOf(emptyMap), null)
   assert.deepEqual(Object.keys(objectMap), [])
   assert.deepEqual(Object.keys(emptyMap), [])
-})
-
-test('getMap safely stores __proto__ as an own key', async () => {
-  const cache = createCache({
-    request: async () => [{ id: '__proto__', name: 'safe' }],
-    keyField: 'id',
-  })()
-
-  const map = await cache.getMap()
-  assert.equal(Object.getPrototypeOf(map), null)
-  assert.equal(Object.hasOwn(map, '__proto__'), true)
-  assert.deepEqual(map.__proto__, { id: '__proto__', name: 'safe' })
+  assert.equal(Object.hasOwn(protoMap, '__proto__'), true)
+  assert.deepEqual(protoMap.__proto__, { id: '__proto__', name: 'safe' })
   assert.equal({}.polluted, undefined)
-})
-
-test('createCaches and createCacheRegistry isolate request stores', async () => {
-  const batch = createCaches({
-    user: async (id) => ({ id }),
-    roles: async () => [{ value: 'admin', label: 'Admin' }],
-  })
-
-  assert.deepEqual(await batch.user(7).getResult(), { id: 7 })
-  assert.deepEqual(
-    await batch.roles().getMap(),
-    Object.assign(Object.create(null), { admin: 'Admin' })
-  )
-
-  const registry = createCacheRegistry({})
-  const request = async (id) => ({ id })
-  const firstFactory = registry.register(request)
-  const secondFactory = registry.register(request)
-
-  assert.equal(firstFactory, secondFactory)
-  assert.equal(firstFactory(1), secondFactory(1))
 })
