@@ -3,9 +3,7 @@ import type { CacheOptions, CacheResult, DictMap, Fn, Obj } from './types'
 
 type EntryStatus = 'ready' | 'pending' | 'loaded' | 'error'
 
-export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
-  implements CacheResult<Result>
-{
+export class CacheEntry<Raw = Obj, Result = Raw, P extends any[] = any[]> {
   _cachedData: Raw | undefined
   _inFlight: Promise<Raw> | undefined
   _map: DictMap<Result> | undefined
@@ -14,22 +12,42 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
   _error: unknown
   _requestId = 0
   readonly _emptyMap = Object.create(null) as DictMap<Result>
-  readonly _request: (...args: any[]) => Promise<Raw>
-  readonly _params: any[]
+  readonly _request: (...args: P) => Promise<Raw>
+  readonly _params: P
   readonly _keyField?: string
   readonly _labelField?: string
   readonly _resultPromises = new WeakMap<Promise<Raw>, Promise<Result>>()
+  readonly _listeners = new Set<() => void>()
+  readonly exposed: CacheResult<Result>
 
-  constructor(request: Fn<Promise<Raw>>, ...params: any[])
-  constructor(config: CacheOptions<Raw>, ...params: any[])
-  constructor(config: Fn<Promise<Raw>> | CacheOptions<Raw>, ...params: any[]) {
-    const options: CacheOptions<Raw> =
+  constructor(request: (...args: P) => Promise<Raw>, ...params: P)
+  constructor(config: CacheOptions<Raw, P>, ...params: P)
+  constructor(
+    config: ((...args: P) => Promise<Raw>) | CacheOptions<Raw, P>,
+    ...params: P
+  ) {
+    const options: CacheOptions<Raw, P> =
       typeof config === 'function' ? { request: config } : config
 
     this._request = options.request
     this._params = params
     this._keyField = options.keyField
     this._labelField = options.labelField
+
+    const entry = this
+    this.exposed = Object.freeze({
+      get result() {
+        return entry._readResult()
+      },
+      get map() {
+        return entry._readMap()
+      },
+      subscribe: (listener) => entry.subscribe(listener),
+      getResult: () => entry.getResult(),
+      getMap: () => entry.getMap(),
+      reload: () => entry.reload(),
+      clear: () => entry.clear(),
+    })
 
     void this._startLoad().catch(() => undefined)
   }
@@ -55,6 +73,7 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
           this._result = undefined
           this._map = undefined
           this._status = 'loaded'
+          this._notify()
         }
         return raw
       })
@@ -80,6 +99,15 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
     return this._startLoad()
   }
 
+  _notify() {
+    this._listeners.forEach((listener) => listener())
+  }
+
+  subscribe(listener: () => void) {
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
+  }
+
   _transformResult(raw: Raw): Result {
     if (Array.isArray(raw) && this._keyField && this._labelField) {
       return raw.map((item) => ({
@@ -95,7 +123,7 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
     const existing = this._resultPromises.get(rawPromise)
     if (existing) return existing
 
-    const promise = rawPromise.then(() => this.result as Result)
+    const promise = rawPromise.then(() => this._readResult() as Result)
     this._resultPromises.set(rawPromise, promise)
     return promise
   }
@@ -122,9 +150,10 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
     this._result = undefined
     this._error = undefined
     this._status = 'ready'
+    this._notify()
   }
 
-  get result(): Result | undefined {
+  _readResult(): Result | undefined {
     if (this._result === undefined && this._cachedData !== undefined) {
       this._result = this._transformResult(this._cachedData)
     }
@@ -133,10 +162,10 @@ export class CacheEntry<Raw extends Obj | Obj[] = Obj, Result = Raw>
 
   async getMap(): Promise<DictMap<Result>> {
     await this._getRawResult()
-    return this.map
+    return this._readMap()
   }
 
-  get map(): DictMap<Result> {
+  _readMap(): DictMap<Result> {
     if (this._map !== undefined) return this._map
     if (this._cachedData === undefined) return this._emptyMap
 

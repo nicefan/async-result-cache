@@ -8,6 +8,10 @@ export type CacheOptions<T = any, P extends any[] = any> = {
   labelField?: string
 }
 
+export type CacheApi<T = any, P extends any[] = any[]> =
+  | CacheOptions<T, P>
+  | ((...args: P) => Promise<T>)
+
 export type DictMap<T> = T extends any[]
   ? Record<string, T[0] extends { value: any; label: infer Label } ? Label : T[0]>
   : Record<PropertyKey, never>
@@ -25,25 +29,40 @@ export type DictionaryOption<
 export interface CacheResult<Result = any> {
   readonly result: Result | undefined
   readonly map: DictMap<Result>
+  subscribe(listener: () => void): () => void
   getResult(): Promise<Result>
   getMap(): Promise<DictMap<Result>>
   reload(): Promise<Result>
   clear(): void
 }
 
-export type GetRequest<T extends Fn | CacheOptions> = T extends {
+export interface CacheData<Result = any> {
+  result: Result
+  map: DictMap<Result>
+}
+
+export interface CacheController<P extends any[] = any[], Result = any> {
+  get(...args: P): Promise<CacheData<Result>>
+  getResult(...args: P): Promise<Result>
+  getMap(...args: P): Promise<DictMap<Result>>
+  reload(...args: P): Promise<Result>
+  useEntry(...args: P): CacheResult<Result>
+  clear(...args: P): void
+}
+
+export type GetRequest<T extends CacheApi> = T extends {
   request: infer P extends Fn
 }
   ? P
   : Extract<T, Fn>
 
-export type RequestReturn<T extends Fn | CacheOptions> = ReturnType<GetRequest<T>> extends Promise<
+export type RequestReturn<T extends CacheApi> = ReturnType<GetRequest<T>> extends Promise<
   infer R
 >
   ? NonNullable<R>
   : never
 
-export type CacheResultFor<T extends Fn | CacheOptions> = T extends {
+export type CacheResultFor<T extends CacheApi> = T extends {
   keyField: infer K
   labelField: infer L
 }
@@ -56,24 +75,21 @@ export type CacheResultFor<T extends Fn | CacheOptions> = T extends {
     : CacheResult<RequestReturn<T>>
   : CacheResult<RequestReturn<T>>
 
+export type CacheValueFor<T extends CacheApi> =
+  CacheResultFor<T> extends CacheResult<infer Result> ? Result : never
+
+export type CacheControllerFor<T extends CacheApi> = CacheController<
+  Parameters<GetRequest<T>>,
+  CacheValueFor<T>
+>
+
 export interface CacheFactory {
-  register<
-    P extends any[],
-    R extends Obj<any>[],
-    K extends keyof R[0] & string,
-    L extends keyof R[0] & string,
-  >(
-    api: CacheOptions<R, P> & { keyField: K; labelField: L }
-  ): (...args: P) => CacheResult<DictionaryOption<R[0], K, L>[]>
+  cache<const T extends CacheApi>(api: T): CacheControllerFor<T>
 
-  register<P extends any[], R extends Obj<any>>(
-    api: CacheOptions<R, P> | ((...args: P) => Promise<R>)
-  ): (...args: P) => CacheResult<R>
-
-  registerGroup<const T extends Obj<Fn | CacheOptions>>(
+  cacheGroup<const T extends Obj<CacheApi>>(
     apis: T
   ): {
-    [K in keyof T]: (...args: Parameters<GetRequest<T[K]>>) => CacheResultFor<T[K]>
+    [K in keyof T]: CacheControllerFor<T[K]>
   }
 
   clear(name: string): void

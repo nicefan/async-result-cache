@@ -1,6 +1,12 @@
-export { createCache as default, createCache } from './createCache'
+export {
+  createCacheScope as default,
+  createCache,
+  createCacheScope,
+} from './createCacheScope'
 
 export type {
+  CacheController,
+  CacheData,
   CacheFactory,
   CacheOptions,
   CacheResult,

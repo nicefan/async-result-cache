@@ -1,16 +1,23 @@
 {
   "name": "async-result-cache",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cache, deduplicate, refresh, and map asynchronous request results.",
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": "./dist/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue.d.ts",
+      "import": "./dist/vue.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
     }
   },
   "files": [
@@ -18,7 +25,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsup src/index.ts --format esm --splitting false --dts --clean && tsup src/vue.ts --format esm --splitting false --dts --external vue && tsup src/react.ts --format esm --splitting false --dts --external react",
     "typecheck": "tsc --noEmit",
     "test": "pnpm run build && node --test test/*.test.js",
     "check": "pnpm run typecheck && pnpm run test",
@@ -44,6 +51,18 @@
     "email": "covien@msn.com"
   },
   "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18",
+    "vue": ">=3.3"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
   "publishConfig": {
     "access": "public"
   },

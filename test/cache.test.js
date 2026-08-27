@@ -1,46 +1,102 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import createCache, { createCache as createNamedCache } from '../dist/index.js'
+import createCacheScope, {
+  createCache,
+  createCacheScope as createNamedCache,
+} from '../dist/index.js'
 
-test('exports createCache as default and named API', () => {
-  assert.equal(createCache, createNamedCache)
+test('exports createCacheScope as default and named API', () => {
+  assert.equal(createCacheScope, createNamedCache)
 })
 
-test('register reuses APIs and entries', async () => {
-  const cache = createCache()
+test('createCache creates a standalone cache controller', async () => {
+  let calls = 0
+  const request = async (id) => {
+    calls += 1
+    return { id }
+  }
+  const userCache = createCache(request)
+  const duplicate = createCache(request)
+
+  assert.equal(userCache.useEntry(1), duplicate.useEntry(1))
+  assert.deepEqual(await userCache.getResult(1), { id: 1 })
+  assert.deepEqual(await userCache.get(1), {
+    result: { id: 1 },
+    map: Object.create(null),
+  })
+  assert.equal(calls, 1)
+
+  userCache.clear(2)
+  assert.equal(calls, 1)
+
+  userCache.clear(1)
+  assert.deepEqual(await userCache.getResult(1), { id: 1 })
+  assert.equal(calls, 2)
+})
+
+test('cache controllers reuse entries', async () => {
+  const cache = createCacheScope()
   let calls = 0
   const request = async (id) => {
     calls += 1
     return { id, name: `user-${id}` }
   }
 
-  const getUser = cache.register(request)
-  assert.equal(cache.register(request), getUser)
+  const getUser = cache.cache(request)
+  const duplicate = cache.cache(request)
 
-  const first = getUser(1)
-  const second = getUser(1)
-  const other = getUser(2)
+  const first = getUser.useEntry(1)
+  const second = duplicate.useEntry(1)
+  const other = getUser.useEntry(2)
 
   assert.equal(first, second)
   assert.notEqual(first, other)
+  assert.equal(first.constructor, Object)
+  assert.equal(Object.isFrozen(first), true)
+  assert.equal('_cachedData' in first, false)
   assert.deepEqual(await first.getResult(), { id: 1, name: 'user-1' })
   assert.deepEqual(await other.getResult(), { id: 2, name: 'user-2' })
   assert.equal(calls, 2)
 })
 
+test('entries expose data subscriptions with explicit cleanup', async () => {
+  const cache = createCacheScope()
+  let resolveRequest
+  const entry = cache.cache(
+    () => new Promise((resolve) => {
+      resolveRequest = resolve
+    })
+  ).useEntry()
+  let updates = 0
+  const unsubscribe = entry.subscribe(() => {
+    updates += 1
+  })
+
+  resolveRequest({ ok: true })
+  await entry.getResult()
+  assert.equal(updates, 1)
+
+  entry.clear()
+  assert.equal(updates, 2)
+
+  unsubscribe()
+  entry.clear()
+  assert.equal(updates, 2)
+})
+
 test('entries deduplicate concurrent loads', async () => {
-  const cache = createCache()
+  const cache = createCacheScope()
   let resolveRequest
   let calls = 0
-  const getData = cache.register(() => {
+  const getData = cache.cache(() => {
     calls += 1
     return new Promise((resolve) => {
       resolveRequest = resolve
     })
   })
 
-  const entry = getData()
+  const entry = getData.useEntry()
   const first = entry.getResult()
   const second = entry.getResult()
 
@@ -53,13 +109,13 @@ test('entries deduplicate concurrent loads', async () => {
 })
 
 test('result and map snapshots are synchronous and stable after loading', async () => {
-  const cache = createCache()
-  const getItems = cache.register({
+  const cache = createCacheScope()
+  const getItems = cache.cache({
     request: async () => [{ id: 1, name: 'one' }],
     keyField: 'id',
     labelField: 'name',
   })
-  const entry = getItems()
+  const entry = getItems.useEntry()
 
   await new Promise((resolve) => setImmediate(resolve))
 
@@ -78,34 +134,34 @@ test('result and map snapshots are synchronous and stable after loading', async 
 })
 
 test('reload starts a new request after settlement and merges active requests', async () => {
-  const cache = createCache()
+  const cache = createCacheScope()
   const resolvers = []
   let calls = 0
-  const entry = cache.register(() => {
+  const dataCache = cache.cache(() => {
     calls += 1
     return new Promise((resolve) => resolvers.push(resolve))
-  })()
+  })
 
-  const initial = entry.getResult()
-  assert.equal(entry.reload(), initial)
+  const initial = dataCache.getResult()
+  assert.equal(dataCache.reload(), initial)
   resolvers[0]({ value: 1 })
   assert.deepEqual(await initial, { value: 1 })
 
-  const refreshed = entry.reload()
-  assert.equal(entry.reload(), refreshed)
+  const refreshed = dataCache.reload()
+  assert.equal(dataCache.reload(), refreshed)
   assert.equal(calls, 2)
   resolvers[1]({ value: 2 })
   assert.deepEqual(await refreshed, { value: 2 })
 })
 
 test('failures reject and a failed reload preserves successful snapshots', async () => {
-  const cache = createCache()
+  const cache = createCacheScope()
   const initialError = new Error('initial failure')
   let initialCalls = 0
-  const failed = cache.register(async () => {
+  const failed = cache.cache(async () => {
     initialCalls += 1
     throw initialError
-  })()
+  }).useEntry()
 
   await assert.rejects(failed.getResult(), initialError)
   await assert.rejects(failed.getResult(), initialError)
@@ -113,14 +169,14 @@ test('failures reject and a failed reload preserves successful snapshots', async
 
   const reloadError = new Error('reload failure')
   let reloadCalls = 0
-  const entry = cache.register({
+  const entry = cache.cache({
     request: async () => {
       reloadCalls += 1
       if (reloadCalls > 1) throw reloadError
       return [{ id: 1 }]
     },
     keyField: 'id',
-  })()
+  }).useEntry()
 
   const result = await entry.getResult()
   const map = await entry.getMap()
@@ -131,22 +187,22 @@ test('failures reject and a failed reload preserves successful snapshots', async
 })
 
 test('entry clear keeps identity and discards pending cache writes', async () => {
-  const cache = createCache()
+  const cache = createCacheScope()
   const resolvers = []
   let calls = 0
-  const getItems = cache.register({
+  const getItems = cache.cache({
     request: () => {
       calls += 1
       return new Promise((resolve) => resolvers.push(resolve))
     },
     keyField: 'id',
   })
-  const entry = getItems()
+  const entry = getItems.useEntry()
   const staleResult = entry.getResult()
   const staleMap = entry.getMap()
 
-  entry.clear()
-  assert.equal(getItems(), entry)
+  getItems.clear()
+  assert.equal(getItems.useEntry(), entry)
 
   const currentResult = entry.getResult()
   const currentMap = entry.getMap()
@@ -170,21 +226,21 @@ test('entry clear keeps identity and discards pending cache writes', async () =>
 })
 
 test('factory clear invalidates one named API and clearAll invalidates every API', async () => {
-  const cache = createCache()
+  const cache = createCacheScope()
   let userCalls = 0
   let roleCalls = 0
-  const apis = cache.registerGroup({
+  const apis = cache.cacheGroup({
     user: async (id) => ({ id, call: ++userCalls }),
     role: async (id) => ({ id, call: ++roleCalls }),
   })
 
-  const user = apis.user(1)
-  const role = apis.role(1)
+  const user = apis.user.useEntry(1)
+  const role = apis.role.useEntry(1)
   assert.deepEqual(await user.getResult(), { id: 1, call: 1 })
   assert.deepEqual(await role.getResult(), { id: 1, call: 1 })
 
   cache.clear('user')
-  assert.equal(apis.user(1), user)
+  assert.equal(apis.user.useEntry(1), user)
   assert.deepEqual(await user.getResult(), { id: 1, call: 2 })
   assert.equal(await role.getResult(), role.result)
   assert.equal(roleCalls, 1)
@@ -194,31 +250,32 @@ test('factory clear invalidates one named API and clearAll invalidates every API
   assert.deepEqual(await role.getResult(), { id: 1, call: 2 })
 })
 
-test('register rejects name conflicts', () => {
-  const cache = createCache()
-  cache.register({
+test('cache uses name as the cache key', () => {
+  const cache = createCacheScope()
+  const first = cache.cache({
     name: 'user',
     request: async ({ id }) => ({ id }),
   })
+  const second = cache.cache({
+    name: 'user',
+    request: async () => ({ id: 2 }),
+  })
 
-  assert.throws(
-    () => cache.register({ name: 'user', request: async () => ({}) }),
-    /Cache name already registered: user/
-  )
+  assert.equal(first.useEntry({ id: 1 }), second.useEntry({ id: 1 }))
 })
 
 test('getMap returns null-prototype maps and safely stores __proto__', async () => {
-  const cache = createCache()
-  const objectEntry = cache.register(async () => ({ id: 1 }))()
-  const emptyEntry = cache.register(async () => [])()
-  const protoEntry = cache.register({
+  const cache = createCacheScope()
+  const objectCache = cache.cache(async () => ({ id: 1 }))
+  const emptyCache = cache.cache(async () => [])
+  const protoCache = cache.cache({
     request: async () => [{ id: '__proto__', name: 'safe' }],
     keyField: 'id',
-  })()
+  })
 
-  const objectMap = await objectEntry.getMap()
-  const emptyMap = await emptyEntry.getMap()
-  const protoMap = await protoEntry.getMap()
+  const objectMap = await objectCache.getMap()
+  const emptyMap = await emptyCache.getMap()
+  const protoMap = await protoCache.getMap()
 
   assert.equal(Object.getPrototypeOf(objectMap), null)
   assert.equal(Object.getPrototypeOf(emptyMap), null)
